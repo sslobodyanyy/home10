@@ -1,0 +1,488 @@
+4  .env.example 
+@@ -1,5 +1,9 @@
+ACCESS_SECRET_KEY =
+ACTIVATE_ACCOUNT_SECRET_KEY =
+AWS_S3_NAME =
+AWS_S3_REGION =
+AWS_S3_ACCESS_KEY =
+AWS_S3_SECRET_KEY =
+EMAIL_SUPER_ADMIN =
+FORGOT_PASSWORD_SECRET_KEY =
+FRONTEND_URL =
+FRONTEND_URL_PASSWORD =
+MONG_CONNECT =
+NAME_SUPER_ADMIN =
+NO_REPLY_EMAIL =
+NO_REPLY_EMAIL_PASSWORD =
+PORT =
+REFRESH_SECRET_KEY =
+TEMP_PASS =
+URL_ACTIVATE =
+  2  app.js 
+@@ -1,5 +1,6 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const expressFileUpload = require('express-fileupload');
+
+require('dotenv').config();
+
+@@ -18,6 +19,7 @@ mongoose.connect(MONG_CONNECT);
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(expressFileUpload());
+
+app.use('/admin', adminRouter);
+app.use('/auth', authRouter);
+app.use('/cars', carRouter);
+app.use('/users', userRouter);
+app.use('*', _notFoundError);
+app.use(_mainErrorHandler);
+(async () => {
+    try {
+        await superAdminUtil.checkCreateSuperAdmin();
+    } catch (e) {
+        console.log(e);
+    }
+})();
+app.listen(PORT, () => {
+    console.log('App listen', PORT);
+});
+function _notFoundError(err, req, res, next) {
+    next({
+        status: err.status || statusCodes.NOT_FOUND,
+        message: err.message || errorMessage.NOT_FOUND
+    });
+}
+// eslint-disable-next-line no-unused-vars
+function _mainErrorHandler(err, req, res, next) {
+    res.status(err.status || statusCodes.INTERNAL_SERVER_ERROR).json({ message: err.message });
+}
+ 8  config/constants.js 
+@@ -1,14 +1,22 @@
+module.exports = {
+    AMAZONAWS: 'amazonaws.com/',
+    AUTH: true,
+    AUTHORIZATION: 'Authorization',
+    CURRENT_YEAR: new Date().getFullYear(),
+    DONE: 'done',
+    EMAIL_REGEXP: new RegExp('^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$'),
+    ID_REGEXP: new RegExp('^[0-9a-fA-F]{24}$'),
+    MIMETYPES: {
+        PHOTO: [
+            'image/jpeg',
+            'image/png'
+        ]
+    },
+    NEED_ITEM: true,
+    NO_REPLY: 'no reply',
+    QUERY_ACTION_TOKEN: '?action_token=',
+    PASSWORD_REGEXP: new RegExp(/^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#\\$%\\^&\\*])(?=.{8,128})/),
+    PHOTO_MAX_SIZE: 5 * 1024 * 1024,
+    SALT: 10,
+    SERVICE: 'gmail',
+    START_YEAR: 1950,
+    SYSTEM: 'system',
+    TOKEN_TYPE_ACCESS: 'access_token',
+    TOKEN_TYPE_REFRESH: 'refresh_token'
+};
+ 2  config/error.message.js 
+@@ -1,10 +1,12 @@
+module.exports = {
+    ACCOUNT_IS_NOT_ACTIVATED: 'account is not activated',
+    EXIST_EMAIL: 'email is already exist',
+    FILE_TOO_BIG: 'file is too big',
+    FORBIDDEN: 'forbidden',
+    NO_TOKEN: 'no token',
+    NOT_FOUND: 'not found',
+    NOT_VALID_TOKEN: 'not valid token',
+    WRONG_FILE_FORMAT: 'wrong file format',
+    WRONG_LOG_OR_PASS: 'wrong email or password',
+    WRONG_ROLE: 'wrong role',
+    WRONG_TEMPLATE_NAME: 'wrong template name',
+ 4  config/variables.js 
+@@ -1,6 +1,10 @@
+module.exports = {
+    ACCESS_SECRET_KEY: process.env.ACCESS_SECRET_KEY || 'Secret',
+    ACTIVATE_ACCOUNT_SECRET_KEY: process.env.ACTIVATE_ACCOUNT_SECRET_KEY || 'Word',
+    AWS_S3_NAME: process.env.AWS_S3_NAME || 'owu-mkn-bucket',
+    AWS_S3_REGION: process.env.AWS_S3_REGION || 'owu-user',
+    AWS_S3_ACCESS_KEY: process.env.AWS_S3_ACCESS_KEY || '',
+    AWS_S3_SECRET_KEY: process.env.AWS_S3_SECRET_KEY || '',
+    EMAIL_SUPER_ADMIN: process.env.EMAIL_SUPER_ADMIN || 'mashaknjazyk@gmail.com',
+    FORGOT_PASSWORD_SECRET_KEY: process.env.FORGOT_PASSWORD_SECRET_KEY || 'SuperWord',
+    FRONTEND_URL: process.env.FRONTEND_URL || 'https://stackoverflow.com',
+  13  controllers/admin.controller.js 
+@@ -2,13 +2,24 @@ const {
+    statusCodes,
+} = require('../config');
+const { superAdminUtil } = require('../utils');
+const { s3Service } = require('../services');
+const { User } = require('../dataBase');
+
+module.exports = {
+    createUser: async (req, res, next) => {
+        try {
+            const { body: { name, email, role }, loginUser } = req;
+
+            await superAdminUtil.createByAdmin(name, email, role, loginUser.name);
+            let createdUser = await superAdminUtil.createByAdmin(name, email, role, loginUser.name);
+
+            if (req.files && req.files.avatar) {
+                const s3Response = await s3Service.uploadFile(req.files.avatar, 'users', createdUser._id);
+                createdUser = await User.findByIdAndUpdate(
+                    createdUser._id,
+                    { avatar: s3Response.Location },
+                    { new: true }
+                );
+            }
+
+            res.status(statusCodes.CREATED).json('ok');
+        } catch (e) {
+            next(e);
+        }
+    },
+};
+  38  controllers/user.controller.js 
+@@ -1,4 +1,4 @@
+const { emailService, jwtService } = require('../services');
+const { emailService, jwtService, s3Service } = require('../services');
+const {
+    actionEnum: { ACTIVATE_ACCOUNT },
+    constants: { QUERY_ACTION_TOKEN },
+    emailActionsEnum,
+    statusCodes,
+    variables: { URL_ACTIVATE }
+} = require('../config');
+const { ActToken, User } = require('../dataBase');
+const { userUtil } = require('../utils');
+module.exports = {
+    createUser: async (req, res, next) => {
+        try {
+            const createdUser = await User.createWithHashPassword(req.body);
+            let createdUser = await User.createWithHashPassword(req.body);
+
+            if (req.files && req.files.avatar) {
+                const s3Response = await s3Service.uploadFile(req.files.avatar, 'users', createdUser._id);
+                createdUser = await User.findByIdAndUpdate(
+                    createdUser._id,
+                    { avatar: s3Response.Location },
+                    { new: true }
+                );
+            }
+
+            const userToReturn = userUtil.userNormalizator(createdUser);
+
+            const action_token = await jwtService.generateActionToken(ACTIVATE_ACCOUNT);
+            await ActToken.create({ action_token, user: userToReturn._id, action: ACTIVATE_ACCOUNT });
+            await emailService.sendMail(
+                userToReturn.email,
+                emailActionsEnum.WELCOME,
+                { userName: userToReturn.name, activeTokenURL: URL_ACTIVATE + QUERY_ACTION_TOKEN + action_token }
+            );
+            res.status(statusCodes.CREATED).json(userToReturn);
+        } catch (e) {
+            next(e);
+        }
+    },
+    deleteUser: async (req, res, next) => {
+        try {
+            const { deletedByUser, user, params: { userId } } = req;
+            await User.deleteOne({ _id: userId });
+            if (deletedByUser) {
+                await emailService.sendMail(
+                    user.email,
+                    emailActionsEnum.DELETED_BY_USER,
+                    { userName: user.name }
+                );
+            } else {
+                await emailService.sendMail(
+                    user.email,
+                    emailActionsEnum.DELETED_BY_ADMIN,
+                    { userName: user.name }
+                );
+            }
+
+            if (user.avatar) {
+                await s3Service.deleteFile(user.avatar);
+            }
+
+            res.sendStatus(statusCodes.DELETED);
+        } catch (e) {
+            next(e);
+        }
+    },
+    getUsers: async (req, res, next) => {
+        try {
+            const users = await User.find(req.query);
+            const usersToReturn = users.map((user) => userUtil.userNormalizator(user));
+            res.json(usersToReturn);
+        } catch (e) {
+            next(e);
+        }
+    },
+    getUserById: (req, res, next) => {
+        try {
+            const { user } = req;
+            const userToReturn = userUtil.userNormalizator(user);
+            res.json(userToReturn);
+        } catch (e) {
+            next(e);
+        }
+    },
+
+    updateUser: async (req, res, next) => {
+        try {
+            const { userId } = req.params;
+
+            const userUpdate = await User.findByIdAndUpdate(userId, req.body);
+            let { user } = req;
+
+            if (req.files && req.files.avatar) {
+                if (user.avatar) {
+                    await s3Service.deleteFile(user.avatar);
+                }
+
+                const s3Response = await s3Service.uploadFile(req.files.avatar, 'users', user._id);
+                user = await User.findByIdAndUpdate(
+                    user._id,
+                    { ...req.body, avatar: s3Response.Location },
+                    { new: true }
+                );
+            } else {
+                user = await User.findByIdAndUpdate(user._id, req.body);
+            }
+
+            const userToReturn = userUtil.userNormalizator(userUpdate);
+            const userToReturn = userUtil.userNormalizator(user);
+
+            await emailService.sendMail(
+                userToReturn.email,
+  4  dataBase/User.js 
+@@ -4,6 +4,10 @@ const { databaseTableEnum: { USER }, userRolesEnum } = require('../config');
+const { passwordService } = require('../services');
+
+const userSchema = new Schema({
+    avatar: {
+        type: String
+    },
+
+    email: {
+        trim: true,
+        type: String,
+ 27  middlewares/file.middleware.js 
+@@ -0,0 +1,27 @@
+const { constants: { PHOTO_MAX_SIZE, MIMETYPES }, errorMessage, statusCodes } = require('../config');
+const { ErrorHandler } = require('../errors');
+
+module.exports = {
+    checkAvatar: (req, res, next) => {
+        try {
+            if (!req.files || !req.files.avatar) {
+                next();
+                return;
+            }
+
+            const { size, mimetype } = req.files.avatar;
+
+            if (size > PHOTO_MAX_SIZE) {
+                throw new ErrorHandler(statusCodes.BAD_REQUEST, errorMessage.FILE_TOO_BIG);
+            }
+
+            if (!MIMETYPES.PHOTO.includes(mimetype)) {
+                throw new ErrorHandler(statusCodes.BAD_REQUEST, errorMessage.WRONG_FILE_FORMAT);
+            }
+
+            next();
+        } catch (e) {
+            next(e);
+        }
+    }
+};
+ 1  middlewares/index.js 
+@@ -1,5 +1,6 @@
+module.exports = {
+    authMiddleware: require('./auth.middleware'),
+    carMiddleware: require('./car.middleware'),
+    fileMiddlewares: require('./file.middleware'),
+    userMiddleware: require('./user.middleware')
+};
+  5  package.json 
+@@ -11,16 +11,19 @@
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.986.0",
+    "bcrypt": "^5.0.1",
+    "dotenv": "^10.0.0",
+    "email-templates": "^8.0.8",
+    "express": "^4.17.1",
+    "express-fileupload": "^1.2.1",
+    "express-handlebars": "^5.3.3",
+    "joi": "^17.4.2",
+    "jsonwebtoken": "^8.5.1",
+    "mongoose": "^6.0.2",
+    "nodemailer": "^6.6.3",
+    "pug": "^3.0.2"
+    "pug": "^3.0.2",
+    "uuid": "^8.3.2"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^6.4.4",
+  3  routers/admin.router.js 
+@@ -1,6 +1,6 @@
+const router = require('express').Router();
+
+const { authMiddleware, userMiddleware } = require('../middlewares');
+const { authMiddleware, fileMiddlewares, userMiddleware } = require('../middlewares');
+const { adminController } = require('../controllers');
+const {
+    constants: { NEED_ITEM },
+@@ -12,6 +12,7 @@ const {
+router.post(
+    '/create',
+    userMiddleware.validateDataDynamic(destiny.user.CREATE_BY_ADMIN),
+    fileMiddlewares.checkAvatar,
+    authMiddleware.validateToken(),
+    userMiddleware.checkUserRoleAccess([
+        ADMIN,
+  4  routers/user.router.js 
+@@ -9,7 +9,7 @@ const {
+    userRolesEnum: { ADMIN, SUPER_ADMIN, USER }
+} = require('../config');
+const { userController } = require('../controllers');
+const { authMiddleware, userMiddleware } = require('../middlewares');
+const { authMiddleware, fileMiddlewares, userMiddleware } = require('../middlewares');
+
+router.get(
+    '/',
+@@ -19,6 +19,7 @@ router.get(
+router.post(
+    '/',
+    userMiddleware.validateDataDynamic(destiny.user.CREATE_USER),
+    fileMiddlewares.checkAvatar,
+    userMiddleware.checkUserRoleForCreate([USER]),
+    userMiddleware.getUserByDynamicParam(paramName.user.EMAIL),
+    userMiddleware.isUserPresent(!NEED_ITEM),
+@@ -49,6 +50,7 @@ router.get(
+router.put(
+    '/:userId',
+    userMiddleware.validateDataDynamic(destiny.user.UPDATE_OR_FIND_USER),
+    fileMiddlewares.checkAvatar,
+    authMiddleware.validateToken(),
+    userMiddleware.getUserByDynamicParam(paramName.user.EMAIL),
+    userMiddleware.isUserPresent(!NEED_ITEM),
+ 3  services/index.js 
+@@ -1,5 +1,6 @@
+module.exports = {
+    emailService: require('./email.service'),
+    jwtService: require('./jwt.service'),
+    passwordService: require('./password.service')
+    passwordService: require('./password.service'),
+    s3Service: require('./s3.service')
+};
+ 50  services/s3.service.js 
+@@ -0,0 +1,50 @@
+const path = require('path');
+const S3 = require('aws-sdk/clients/s3');
+const uuid = require('uuid').v1;
+
+const {
+    constants: { AMAZONAWS },
+    variables:
+        {
+            AWS_S3_ACCESS_KEY,
+            AWS_S3_NAME,
+            AWS_S3_SECRET_KEY,
+            AWS_S3_REGION
+        }
+} = require('../config');
+
+const bucket = new S3({
+    region: AWS_S3_REGION,
+    accessKeyId: AWS_S3_ACCESS_KEY,
+    secretAccessKey: AWS_S3_SECRET_KEY
+});
+
+module.exports = {
+    uploadFile: (file, itemType, itemId) => {
+        const { data, mimetype, name } = file;
+
+        const fileName = _fileNameBuilder(name, itemType, itemId.toString());
+
+        return bucket.upload({
+            Bucket: AWS_S3_NAME,
+            Body: data,
+            Key: fileName,
+            ContentType: mimetype
+        }).promise();
+    },
+
+    deleteFile: (location) => {
+        const Key = location.split(AMAZONAWS)[1];
+
+        return bucket.deleteObject({
+            Bucket: AWS_S3_NAME,
+            Key,
+        }).promise();
+    }
+};
+
+function _fileNameBuilder(fileName, itemType, itemId) {
+    const fileExtension = path.extname(fileName);
+
+    return path.join(itemType, itemId, `${uuid()}${fileExtension}`);
+}
+ 2  utils/superAdmin.util.js 
+@@ -1,45 +1,47 @@
+const { ActToken, User } = require('../dataBase');
+const { jwtService, emailService } = require('../services');
+const {
+    actionEnum: { FORGOT_PASSWORD },
+    constants: { QUERY_ACTION_TOKEN, SYSTEM },
+    userRolesEnum: { SUPER_ADMIN },
+    emailActionsEnum,
+    databaseTableEnum: { USER },
+    variables: {
+        TEMP_PASS,
+        FRONTEND_URL_PASSWORD,
+        NAME_SUPER_ADMIN,
+        EMAIL_SUPER_ADMIN
+    }
+} = require('../config');
+const createByAdmin = async (name, email, role, creatorName = SYSTEM) => {
+    const password = TEMP_PASS + Math.random();
+    const user = await User.createWithHashPassword(
+        {
+            name,
+            password,
+            email,
+            role
+        }
+    );
+    const action_token = await jwtService.generateActionToken(FORGOT_PASSWORD);
+    await ActToken.create({ action_token, [USER]: user._id, action: FORGOT_PASSWORD });
+    await emailService.sendMail(
+        user.email,
+        emailActionsEnum.CREATE_ADMIN,
+        {
+            userName: user.name,
+            creatorName,
+            userRole: user.role,
+            activeTokenURL: FRONTEND_URL_PASSWORD + QUERY_ACTION_TOKEN + action_token
+        }
+    );
+
+    return user;
+};
+
+const checkCreateSuperAdmin = async () => {
+    const superAdmin = await User.findOne({ role: SUPER_ADMIN });
+    if (!superAdmin) {
+        await createByAdmin(NAME_SUPER_ADMIN, EMAIL_SUPER_ADMIN, SUPER_ADMIN);
+    }
+};
+module.exports = {
+    checkCreateSuperAdmin,
+    createByAdmin
+};
